@@ -1,5 +1,6 @@
 import { join } from "node:path";
-import { mkdirSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync, renameSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { homedir } from "node:os";
 import { createWorkBuddyShim } from "./vendor/workbuddy/src/shim.ts";
 import { atRestKeyProviderFor } from "./vendor/workbuddy/src/desktop-credential-protection.ts";
@@ -8,6 +9,7 @@ import { CN_VARIANT, AI_VARIANT } from "./vendor/workbuddy/src/variants.ts";
 import { WorkBuddyUpstreamClient } from "./vendor/workbuddy/src/upstream.ts";
 import { WorkBuddyCatalog, FALLBACK_WORKBUDDY_MODELS, FALLBACK_WORKBUDDY_AI_MODELS } from "./vendor/workbuddy/src/catalog.ts";
 import { createTraeShim } from "./vendor/trae/src/shim.ts";
+import { TraeUsageClient } from "./vendor/trae/src/usage.ts";
 import { TraeCredentialStore } from "./vendor/trae/src/auth.ts";
 import { traeStorageCandidates } from "./vendor/trae/src/paths.ts";
 import { regionOfEdition } from "./vendor/trae/src/region.ts";
@@ -18,6 +20,9 @@ import { TraeSoloBridge } from "./vendor/trae/src/solo-bridge.ts";
 import { TraeSoloRemoteCatalogClient } from "./vendor/trae/src/solo-remote.ts";
 import { TraeCatalog, mergeTraeModelSources, fallbackModelsFor } from "./vendor/trae/src/catalog.ts";
 import { REGIONS, appDataRootFor, loadCredentialAsync, isCredentialUsable } from "./vendor/qoder/src/host/credentials.ts";
+import { fetchUsage as fetchQoderUsage } from "./vendor/qoder/src/host/upstream/fetch-usage.ts";
+import { readCampaigns, claimCampaign } from "./vendor/qoder/src/host/upstream/api-calls.ts";
+import { checkinStateFrom, claimableCampaignOf, normalizeClaimResult } from "./vendor/qoder/src/host/claim.ts";
 import { fetchModels as fetchQoderModels } from "./vendor/qoder/src/host/upstream/api-calls.ts";
 import { normalizeEntry } from "./vendor/qoder/src/host/catalog-entry.ts";
 import { rateNow as qoderRateNow } from "./vendor/qoder/src/host/offpeak.ts";
@@ -303,6 +308,131 @@ async function startShim(engine, region) {
   process.once("SIGINT", stop);
 }
 
+function beijingDay() {
+  return new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Shanghai" }).format(new Date());
+}
+function accountHash(credential) {
+  return createHash("sha256").update(JSON.stringify([credential.uid || credential.userId || credential.userID, credential.domain || credential.host || "", credential.enterpriseId || credential.tenantId || ""])).digest("hex");
+}
+function checkinReceipt(credential) {
+  try {
+    const data = JSON.parse(readFileSync(stateFile("checkin-receipt.json"), "utf8"));
+    return data.day === beijingDay() && data.account === accountHash(credential) ? data : null;
+  } catch { return null; }
+}
+function saveCheckinReceipt(credential, result) {
+  if (!result.claimed) return;
+  const file = stateFile("checkin-receipt.json");
+  const temporary = `${file}.${process.pid}.tmp`;
+  writeFileSync(temporary, JSON.stringify({ day: beijingDay(), account: accountHash(credential), claimed: true }), { mode: 0o600 });
+  renameSync(temporary, file);
+}
+function maskedName(value) {
+  return typeof value === "string" && value ? `${value.slice(0, 2)}***` : "已登录账号";
+}
+function quota(remaining, total, packages = 0, unit = "积分") {
+  return { remaining, total, packages, unit };
+}
+function unknownCheckin(reason) {
+  return { state: "unknown", can_claim: false, reason };
+}
+function traeUsage(runtime) {
+  return new TraeUsageClient({ credential: () => runtime.store.resolve(),
+    deviceId: async () => (await runtime.identity()).deviceId, timeoutMs: 20000 });
+}
+async function accountData(engine, region) {
+  const current = await readCredential(engine, region);
+  if (!current) return { logged_in: false, checkin: unknownCheckin("请先登录对应桌面应用") };
+  const result = { logged_in: true, account: maskedName(current.nickname || current.accountName || current.name),
+    checkin: unknownCheckin("状态读取失败"), quota: null };
+  if (engine === "workbuddy") {
+    const runtime = workbuddyRuntime(region);
+    const credential = await runtime.store.resolve();
+    try {
+      const credits = await runtime.client.fetchCredits(credential);
+      result.quota = { ...quota(credits.total, credits.accounts.reduce((n, p) => n + p.size, 0), credits.accounts.length), unlimited: credits.unlimited === true };
+    } catch { result.usage_error = "积分查询失败，请刷新重试"; }
+    const checked = Boolean(checkinReceipt(credential));
+    result.checkin = region === "global" ? { state: "not_applicable", can_claim: false }
+      : { state: checked ? "checked" : "unknown", can_claim: !checked,
+          reason: checked ? "本插件已确认今日签到" : "上游无可靠只读签到状态；点击签到确认，不会在刷新时领取" };
+  } else if (engine === "trae") {
+    const runtime = traeRuntime(region), usage = traeUsage(runtime);
+    const outcomes = await Promise.allSettled([usage.snapshot(AbortSignal.timeout(25000)),
+      region === "cn" ? usage.checkinStatus(AbortSignal.timeout(25000)) : Promise.resolve(null)]);
+    if (outcomes[0].status === "fulfilled") {
+      const snapshot = outcomes[0].value;
+      const packs = snapshot.packs.filter(p => Number.isFinite(p.creditsLimit));
+      const hasSummary = snapshot.isCreditsBilling && snapshot.summary.totalAmount > 0;
+      const total = hasSummary ? snapshot.summary.totalAmount : packs.reduce((n, p) => n + p.creditsLimit, 0);
+      const used = hasSummary ? snapshot.summary.consumedAmount : packs.reduce((n, p) => n + (p.consumedCredits || 0), 0);
+      if (hasSummary || packs.length) result.quota = quota(Math.max(0, total - used), total, packs.length);
+      else result.usage_error = "上游未提供积分套餐数据";
+    } else result.usage_error = "积分查询失败，请刷新重试";
+    if (region !== "cn") result.checkin = { state: "not_applicable", can_claim: false };
+    else if (outcomes[1].status === "fulfilled") {
+      const check = outcomes[1].value, checked = check.checkedIn === true;
+      result.checkin = { state: checked ? "checked" : check.enabled ? "available" : "not_applicable",
+        can_claim: check.enabled && !checked, reward: check.credits };
+    }
+  } else {
+    const area = qoderRegion(region), credential = current;
+    try {
+      const usage = await fetchQoderUsage(area, credential, AbortSignal.timeout(25000));
+      if (usage) {
+        const buckets = [usage.userQuota, usage.addOnQuota].filter(Boolean);
+        if (buckets.length) result.quota = quota(buckets.reduce((n, p) => n + p.remaining, 0), buckets.reduce((n, p) => n + p.total, 0), usage.dedicatedPackages?.length || 0);
+      }
+    } catch { result.usage_error = "积分查询失败，请刷新重试"; }
+    try {
+      const check = checkinStateFrom(await readCampaigns(area, credential, AbortSignal.timeout(20000)));
+      result.checkin = { state: check.todayCheckedIn ? "checked" : check.active ? "available" : "not_applicable",
+        can_claim: check.active && !check.todayCheckedIn, reward: check.amount };
+    } catch { result.checkin = unknownCheckin("签到状态查询失败"); }
+  }
+  return result;
+}
+async function performCheckin(engine, region) {
+  let result, credential;
+  if (engine === "workbuddy") {
+    if (region !== "cn") return { claimed: false, state: "not_applicable" };
+    credential = await workbuddyRuntime(region).store.resolve();
+    if (checkinReceipt(credential)) return { claimed: true, replayed: true };
+    // Protocol transcribed from corrinehu/dsh-buddy-checkin (MIT), check().
+    const response = await fetch(`https://${credential.domain}/v2/billing/meter/daily-checkin`, {
+      method: "POST", headers: { "content-type": "application/json", authorization: `Bearer ${credential.accessToken}`,
+        "x-user-id": credential.uid, "x-domain": credential.domain,
+        ...(credential.enterpriseId ? { "x-enterprise-id": credential.enterpriseId, "x-tenant-id": credential.enterpriseId } : {}) },
+      body: "{}", signal: AbortSignal.timeout(20000) });
+    const data = await response.json();
+    const already = typeof data.msg === "string" && /已.*签到/.test(data.msg);
+    result = { claimed: already || (response.ok && data.code === 0), replayed: already,
+      ...(typeof data.data?.credit === "number" && !already ? { amount: data.data.credit } : {}) };
+  } else if (engine === "trae") {
+    if (region !== "cn") return { claimed: false, state: "not_applicable" };
+    const runtime = traeRuntime(region), usage = traeUsage(runtime);
+    credential = await runtime.store.resolve();
+    const check = await usage.checkinStatus(AbortSignal.timeout(20000));
+    if (check.checkedIn) return { claimed: true, replayed: true };
+    if (!check.enabled) return { claimed: false, state: "not_applicable" };
+    const outcome = await usage.claimCheckin(AbortSignal.timeout(20000));
+    result = { claimed: outcome.claimed, code: outcome.code };
+  } else {
+    const area = qoderRegion(region);
+    credential = await loadCredentialAsync(area, appDataRootFor());
+    if (!credential || !isCredentialUsable(credential)) throw new Error("not signed in");
+    const campaigns = await readCampaigns(area, credential, AbortSignal.timeout(20000));
+    const check = checkinStateFrom(campaigns);
+    if (check.todayCheckedIn) return { claimed: true, replayed: true };
+    const campaign = claimableCampaignOf(campaigns);
+    if (!campaign || !check.active) return { claimed: false, state: "not_applicable" };
+    const outcome = normalizeClaimResult(await claimCampaign(area, credential, campaign.campaignId, AbortSignal.timeout(20000)), campaign);
+    result = { claimed: outcome.claimed, replayed: outcome.replayed, amount: outcome.amount };
+  }
+  saveCheckinReceipt(credential, result);
+  return result;
+}
+
 async function main() {
   const [, , action, engine, region] = process.argv;
   variantFor(engine === "workbuddy" && region === "global" ? "workbuddy-ai"
@@ -310,6 +440,8 @@ async function main() {
     : engine === "trae" && region === "ai" ? "trae-ai"
     : engine === "trae" ? "trae"
     : region);
+  if (action === "account") { output(await accountData(engine, region)); return; }
+  if (action === "checkin") { output(await performCheckin(engine, region)); return; }
   if (action === "status") {
     output(await reportStatus(engine, region));
     return;

@@ -83,6 +83,24 @@ The six profiles are separate providers; they do not appear inside the Nous Port
 
 The adapter uses the live WorkBuddy billing factor, Trae credit multiplier, or Qoder rate resolved for the current off-peak window. If the upstream does not publish a trustworthy value, the picker shows `倍率未知` rather than inferring one.
 
-## Current feature scope
+## Channel center (0.2.0)
 
-This is a Hermes provider/transport adaptation, not full parity with the upstream DSH account panels. Desktop credential reuse, auth commands, live model discovery, multiplier metadata and text inference are implemented. Interactive per-model visibility controls, browser/device login panels, daily check-in, quota/points dashboards and multi-account management have not yet been exposed in the Hermes UI. Their upstream sources may be retained under vendor/, but retaining source is not an implemented feature. Sign in through the matching desktop app; the current Hermes auth command reuses that session.
+Enable both the Agent and Desktop switches for the companion package (display name **Hermes 渠道中心**, stable package ID `dsh-model-rates`). Open **渠道中心** from the sidebar or Settings → Plugins → 渠道中心. Restart the Hermes backend after upgrading from 0.1.x, because the new API routes are mounted at backend startup; the Desktop plugin itself can reload live.
+
+The channel center offers:
+
+- Per-channel current credit balance, total allowance, package count and remaining-quota bar.
+- Desktop sign-in reuse with an explicit **认证** button. Credentials stay in the desktop app/Hermes-owned refresh state, never in the UI or plugin settings.
+- A searchable model checklist with live multiplier labels. Save a subset or choose all, including future additions. At least one model must remain selected. Hidden models disappear from the CLI/Desktop catalogs; an already-selected conversation model is not forcibly replaced.
+- Per-channel check-in, **签到所有可签渠道**, and an optional auto-check-in-on-open setting. Automatic check-in is **off by default**. Only a confirmed POST/explicitly enabled auto action can claim; status/catalog/credits GETs never claim rewards.
+- A sidebar-entry visibility setting and isolated preferences for each active Hermes profile.
+
+WorkBuddy CN has no reliable read-only daily check-in verdict. Before this adapter receives a successful/idempotent claim answer for the current account and Beijing day, it honestly shows **签到状态待确认**, not “not checked in.” WorkBuddy international and Trae international have no matching CN check-in activity. Trae/Qoder status follows their actual campaign APIs; unavailable activities and failed reads remain distinct from zero credits or success.
+
+Model choices live in `$HERMES_HOME/data/dsh-model-providers/<provider>/model-visibility.json`; center preferences in `$HERMES_HOME/data/dsh-model-providers/channel-center.json`. These files contain only model IDs and booleans. A WorkBuddy claim receipt stores a hashed account scope and Beijing day, not credentials. Removing a plugin does not log out the original desktop apps.
+
+Read-only live acceptance on 2026-10-20 confirmed balances for the three CN providers and HTTP 200 channel routes. Isolated checks covered rendering, model selection → Hermes disk catalog cache, profile separation, no automatic claims by default and refusal of unconfirmed claim requests. Real reward-claim requests were deliberately not performed during validation. Balance values and model counts vary upstream.
+
+## Remaining scope
+
+This is still not full parity with every upstream DSH account panel: browser/device-login workflows, multi-account pooling, enterprise-account selection, and the full per-package transaction history are not exposed here. Authenticate or switch accounts in the matching desktop app, then refresh the channel center.

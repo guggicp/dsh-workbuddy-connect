@@ -9,3 +9,5 @@ The protocol code is vendored so the Hermes plugin can run without a DSH process
 | Qoder | [guggicp/dsh-connect-qoder](https://github.com/guggicp/dsh-connect-qoder) | [eghrhegpe/dsh-connect-qoder](https://github.com/eghrhegpe/dsh-connect-qoder) | 0.7.3 | `664871728302ccb50ff44c49a3a01515ed6d4e4a` |
 
 The Hermes-specific bridge imports only the protocol and credential modules it needs. DSH host adapters and UI modules are not part of the runtime import path. DSH home/file-lock helpers used by WorkBuddy and Trae were replaced in the vendored copies by the Hermes-local helpers in `vendor/hermes-deps.ts`. TypeScript constructor parameter properties were rewritten as explicit fields and assignments so Node's built-in TypeScript type stripping can load the modules without a separate compiler.
+
+WorkBuddy daily check-in protocol reference: [corrinehu/dsh-buddy-checkin](https://github.com/corrinehu/dsh-buddy-checkin), commit `6517966808c7d19a14736ba9e59f7550c753afce` (MIT); only the request/response rules are adapted, not its DSH startup hooks or account scanner.

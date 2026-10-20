@@ -1,7 +1,7 @@
 {
   "name": "dsh-model-rates",
-  "label": "DSH Model Multipliers",
-  "description": "Live credit multipliers for WorkBuddy, Trae, and Qoder model choices.",
-  "version": "0.1.1",
+  "label": "Hermes 渠道中心",
+  "description": "Credit balances, model visibility and daily check-in controls for WorkBuddy, Trae and Qoder.",
+  "version": "0.2.0",
   "api": "plugin_api.py"
 }

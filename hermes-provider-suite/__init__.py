@@ -46,6 +46,8 @@ _STATUS_CACHE: dict[tuple[str, str], tuple[float, dict[str, Any]]] = {}
 _CATALOG_CACHE: dict[tuple[str, str], tuple[float, list[dict[str, Any]]]] = {}
 _CATALOG_LOCKS = {name: threading.Lock() for name in _PROVIDERS}
 _STATUS_LOCK = threading.Lock()
+_PREFERENCES_LOCK = threading.Lock()
+_CHECKIN_LOCKS = {name: threading.Lock() for name in _PROVIDERS}
 _CATALOG_TTL = 60.0
 
 
@@ -454,6 +456,67 @@ class HermesDSHProfile(ProviderProfile):
             _STATUS_CACHE[key] = (monotonic(), dict(result))
         return result
 
+    def _selected_models(self) -> set[str] | None:
+        path = _state_dir(self.name) / "model-visibility.json"
+        try:
+            data = json.loads(path.read_text())
+        except FileNotFoundError:
+            return None
+        selected = data.get("selected")
+        if selected is None:
+            return None
+        if not isinstance(selected, list) or any(not isinstance(item, str) for item in selected):
+            raise ValueError("Invalid model visibility settings")
+        return set(selected)
+
+    def _visible_models(self, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        selected = self._selected_models()
+        return rows if selected is None else [row for row in rows if row["id"] in selected]
+
+    def channel_models(self, *, refresh: bool = False) -> dict[str, Any]:
+        if refresh:
+            with _CATALOG_LOCKS[self.name]:
+                _CATALOG_CACHE.pop((str(_hermes_home()), self.name), None)
+        rows = self._model_rows() or []
+        selected = self._selected_models()
+        return {"all_selected": selected is None, "models": [
+            {"id": row["id"], "label": str(row.get("label") or row["id"]),
+             "multiplier_label": self._multiplier_label(row),
+             "selected": selected is None or row["id"] in selected} for row in rows]}
+
+    def set_channel_models(self, selected: list[str] | None) -> dict[str, Any]:
+        if selected is not None:
+            if not selected or len(selected) > 1000 or any(not isinstance(item, str) or not item or len(item) > 300 for item in selected):
+                raise ValueError("Invalid model selection")
+            # Preserve ids absent from a transient catalog: a refresh must not
+            # silently throw away a user's selection.
+            selected = sorted(set(selected))
+        path = _state_dir(self.name) / "model-visibility.json"
+        with _PREFERENCES_LOCK:
+            temporary = path.with_suffix(f".{os.getpid()}.tmp")
+            fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, "w") as handle:
+                json.dump({"selected": selected}, handle)
+            os.replace(temporary, path)
+        return {"saved": True}
+
+    def channel_account(self) -> dict[str, Any]:
+        result = _run_bridge(self.name, "account", timeout=65, node=self._node)
+        return result if result is not None else {"logged_in": False, "unavailable": True,
+            "error": "渠道状态读取失败，请刷新重试"}
+
+    def channel_checkin(self) -> dict[str, Any]:
+        # State changes only on an explicit endpoint call. GETs never claim.
+        with _CHECKIN_LOCKS[self.name]:
+            result = _run_bridge(self.name, "checkin", timeout=65, node=self._node)
+        return result if result is not None else {"claimed": False, "error": "签到请求失败，请刷新状态确认后重试"}
+
+    def channel_login(self) -> dict[str, Any]:
+        if self.setup_status().get("logged_in"):
+            return {"started": False, "message": "已复用对应桌面应用登录态；切换账号请在原应用中完成，再刷新。"}
+        _open_sign_in_app(self.name)
+        return {"started": True, "message": "已尝试打开对应桌面应用，请在那里完成登录，然后点击刷新。"}
+
     def _model_rows(self, timeout: float = 40.0) -> list[dict[str, Any]] | None:
         # Model pickers and multiplier badges share one catalog. A lock prevents
         # duplicate refreshes in a process; the cache contains public metadata only.
@@ -505,7 +568,7 @@ class HermesDSHProfile(ProviderProfile):
         if not rows:
             return None
         discovered: list[dict[str, str]] = []
-        for row in rows:
+        for row in self._visible_models(rows):
             multiplier_label = self._multiplier_label(row)
             discovered.append({
                 "id": row["id"],
@@ -523,7 +586,7 @@ class HermesDSHProfile(ProviderProfile):
         timeout: float = 40.0,
     ) -> list[str] | None:
         rows = self._model_rows(timeout=timeout)
-        return [row["id"] for row in rows] if rows else None
+        return [row["id"] for row in self._visible_models(rows)] if rows is not None else None
 
     def create_client(self, **client_kwargs: Any) -> Any:
         from openai import OpenAI
