@@ -1,0 +1,5 @@
+name: dsh-local-model-providers
+kind: model-provider
+version: 0.1.1
+description: Hermes providers for locally signed-in WorkBuddy, Trae, and Qoder accounts
+author: guggicp

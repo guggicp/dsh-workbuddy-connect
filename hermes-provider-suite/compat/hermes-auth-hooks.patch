@@ -1,0 +1,90 @@
+--- a/hermes_cli/auth.py
++++ b/hermes_cli/auth.py
+@@ -2148,20 +2148,21 @@
+ 
+ 
+ def get_external_process_provider_status(provider_id: str) -> dict[str, Any]:
+-    """Status snapshot for providers that run a local subprocess.
+-
+-    ``configured``/``logged_in`` are structural (executable resolves or TCP endpoint set): the
+-    subprocess owns real auth. ``auth_verified``/``auth_source`` carry positive evidence only."""
++    """Subprocess status, including optional plugin-owned sign-in evidence."""
+     pconfig = _registry_lookup(provider_id)
+     if not pconfig or pconfig.auth_type != "external_process":
+         return {"configured": False}
+     command, args, base_url, resolved_command, _ = _external_process_spec(pconfig)
+     available = bool(resolved_command or base_url.startswith("acp+tcp://"))
+     auth_verified, auth_source = _external_process_auth_evidence(provider_id, resolved_command)
+-    return {
++    status = {
+         "configured": available, "provider": provider_id, "name": pconfig.name, "command": command,
+         "args": args, "resolved_command": resolved_command, "base_url": base_url,
+         "logged_in": available, "auth_verified": auth_verified, "auth_source": auth_source}
++    # HERMES_DESKTOP_APP_AUTH_STATUS: plugin behavior lives in the sibling.
++    from hermes_cli.auth_plugin_providers import plugin_external_auth_status
++    status.update(plugin_external_auth_status(provider_id, available))
++    return status
+ 
+ 
+ def _get_aws_sdk_auth_status(target: str) -> dict[str, Any]:
+--- a/hermes_cli/web_server_oauth.py
++++ b/hermes_cli/web_server_oauth.py
+@@ -124,6 +124,12 @@
+         pconfig = PROVIDER_REGISTRY.get(provider_id)
+         if not pconfig or pconfig.auth_type != "external_process":
+             return default
++        # HERMES_PLUGIN_OWNED_AUTH_COMMAND: synthetic account cards use the
++        # Hermes auth handler, not the inference runtime's executable.
++        if default.startswith("hermes auth "):
++            from hermes_cli.auth_plugin_providers import plugin_auth_handler
++            if callable(plugin_auth_handler(provider_id)):
++                return default
+         status = get_external_process_provider_status(provider_id) or {}
+         command = str(status.get("command") or "").strip()
+         if command:
+--- a/hermes_cli/web_routers/oauth.py
++++ b/hermes_cli/web_routers/oauth.py
+@@ -646,6 +646,13 @@
+     # credential-pool entry, written by `hermes auth add anthropic`), so it is
+     # excluded from the "external providers can't be auto-disconnected" rule.
+     if provider.get("flow") == "external" and provider.get("id") != "anthropic":
++        # HERMES_PLUGIN_DISCONNECT_HINT: borrowed desktop app credentials stay
++        # owned by that app; a plugin may describe that boundary explicitly.
++        from providers import get_provider_profile
++        profile = get_provider_profile(str(provider.get("id") or ""))
++        hint = getattr(profile, "auth_disconnect_hint", None)
++        if isinstance(hint, str) and hint.strip():
++            return hint
+         if _oauth_provider_disconnect_command(provider):
+             # Fallback wording for surfaces without the one-click "run in terminal" path.
+             return "Managed outside Hermes — run the disconnect command to remove it."
+--- a/hermes_cli/auth_plugin_providers.py
++++ b/hermes_cli/auth_plugin_providers.py
+@@ -244,3 +244,27 @@
+         "needs_refresh": bool(refreshable), "accounts": len(entries),
+         "base_url": next((e.base_url for e in live + refreshable if e.base_url), "") or "",
+         "hint": "" if live else f"Run `hermes auth add {provider_id}` to sign in."}
++
++
++
++def plugin_external_auth_status(provider: str, available: bool) -> dict[str, Any]:
++    """Optional non-secret status for a process provider borrowing app sign-in.
++
++    Providers without this hook retain structural CLI evidence. Hook failures
++    cannot produce a signed-in badge. The hook owns cheap local checks/caching.
++    """
++    hook = _profile_hook(provider, "auth_status")
++    if hook is None:
++        return {}
++    try:
++        observed = hook()
++    except Exception:
++        observed = {"available": False, "logged_in": False,
++                    "detail": "Could not read the desktop app sign-in state."}
++    if not isinstance(observed, dict):
++        observed = {"available": False, "logged_in": False}
++    usable = available and observed.get("available", True) is True
++    signed_in = usable and observed.get("logged_in") is True
++    return {"configured": usable, "logged_in": signed_in, "auth_verified": signed_in,
++            "auth_source": "desktop_app" if signed_in else None,
++            "source_label": str(observed.get("detail") or "Desktop app sign-in")}

@@ -1,0 +1,37 @@
+--- a/apps/desktop/src/app/settings/model-select.tsx
++++ b/apps/desktop/src/app/settings/model-select.tsx
+@@ -9,6 +9,8 @@
+ import { isSubmitEnter } from '@/lib/ime'
+ import { cn } from '@/lib/utils'
+ import { addCustomModel, customModelSlug } from '@/store/custom-models'
++
++import { useModelMenuRowDecoration } from '../shell/model-menu-row-decorations'
+ 
+ import { CONTROL_TEXT } from './constants'
+ 
+@@ -146,7 +148,7 @@
+       <SelectContent>
+         {withActive(models, value).map(model => (
+           <SelectItem key={model} value={toItemValue(model)}>
+-            {model}
++            <ModelSelectLabel model={model} provider={providerSlug} />
+           </SelectItem>
+         ))}
+         <SelectSeparator />
+@@ -160,3 +162,16 @@
+     </Select>
+   )
+ }
++
++
++/** HERMES_SETTINGS_MODEL_DECORATION: use the same display-only plugin seam as chat. */
++function ModelSelectLabel({ model, provider }: { model: string; provider: string }) {
++  const { badge } = useModelMenuRowDecoration({ label: model, model, provider })
++
++  return (
++    <span className="inline-flex items-center gap-2">
++      <span>{model}</span>
++      {badge && <span className="text-xs text-muted-foreground">{badge}</span>}
++    </span>
++  )
++}

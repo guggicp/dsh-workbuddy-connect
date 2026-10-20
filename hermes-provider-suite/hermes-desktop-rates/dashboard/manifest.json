@@ -1,0 +1,7 @@
+{
+  "name": "dsh-model-rates",
+  "label": "DSH Model Multipliers",
+  "description": "Live credit multipliers for WorkBuddy, Trae, and Qoder model choices.",
+  "version": "0.1.1",
+  "api": "plugin_api.py"
+}
