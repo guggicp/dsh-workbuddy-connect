@@ -104,3 +104,7 @@ Read-only live acceptance on 2026-10-20 confirmed balances for the three CN prov
 ## Remaining scope
 
 This is still not full parity with every upstream DSH account panel: browser/device-login workflows, multi-account pooling, enterprise-account selection, and the full per-package transaction history are not exposed here. Authenticate or switch accounts in the matching desktop app, then refresh the channel center.
+
+### Profile rename and transient API failures
+
+When a profile is renamed outside Desktop, an open window can retain its former routing ID even while Bots lists the new name. A missing-profile error then affects new-chat model options and channel settings alike. Select the existing profile in Desktop to rebind its route; this plugin does not create a replacement profile or silently redirect writes to default. The channel center reports that condition explicitly. It disables settings until loaded, serializes settings saves, separates connection/profile refreshes, and distinguishes failed multiplier reads from a genuinely unknown upstream multiplier. Transient multiplier failures retry with a bounded backoff.
